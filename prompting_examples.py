@@ -15,6 +15,18 @@ import json
 import os
 import re
 import time
+from pathlib import Path
+
+# Nạp GEMINI_API_KEY từ file .env (nếu có) để chạy ngay, không cần export thủ công.
+try:
+    from dotenv import load_dotenv
+
+    _ENV_FILE = Path(__file__).with_name(".env")
+    if _ENV_FILE.exists():
+        load_dotenv(_ENV_FILE)
+except ImportError:  # python-dotenv là tuỳ chọn
+    pass
+
 
 # ---------------------------------------------------------------------------
 # Gemini client
@@ -34,7 +46,10 @@ def call_gemini(prompt: str) -> str:
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
             resp = client.models.generate_content(model=MODEL, contents=prompt)
-            return resp.text.strip()
+            text = resp.text
+            if text is None:
+                raise RuntimeError("Gemini trả về response rỗng (không có text).")
+            return text.strip()
         except Exception as e:
             if "429" in str(e) and attempt < _MAX_RETRIES:
                 wait = 15 * attempt
@@ -42,6 +57,7 @@ def call_gemini(prompt: str) -> str:
                 time.sleep(wait)
             else:
                 raise
+    raise RuntimeError(f"Gọi Gemini thất bại sau {_MAX_RETRIES} lần thử.")
 
 
 # ---------------------------------------------------------------------------

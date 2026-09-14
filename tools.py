@@ -255,11 +255,89 @@ QUERY_SALES_SCHEMA = {  # Format OpenAI; Gemini adapter convert ở llm.py
 
 
 # ---------------------------------------------------------------------------
+# TOOL 3 — API WRAPPER: get_exchange_rate(currency, base)
+# ---------------------------------------------------------------------------
+# Bài tập mở rộng 1: thêm tool thứ ba để minh hoạ pattern PARALLEL FETCH + MERGE
+# (model gọi nhiều tool trong cùng một lượt, app chạy song song rồi gộp kết quả).
+
+_FAKE_FX_BACKEND = {  # 1 đơn vị ngoại tệ = ? VND (dữ liệu giả lập, offline)
+    "USD": 25400,
+    "EUR": 27650,
+    "JPY": 168,
+    "KRW": 19,
+    "GBP": 32150,
+}
+
+_VALID_CURRENCIES = set(_FAKE_FX_BACKEND)
+
+
+def get_exchange_rate(currency: str, base: str = "VND") -> dict:
+    """Trả về tỷ giá quy đổi của MỘT ngoại tệ sang VND dưới dạng JSON có cấu trúc."""
+    if not currency or not currency.strip():
+        return {
+            "status": "error",
+            "message": "Thiếu tham số 'currency'.",
+            "code": "MISSING_ARGUMENT",
+        }
+    code = currency.strip().upper()
+    base = (base or "VND").strip().upper()
+
+    if base != "VND":
+        return {
+            "status": "error",
+            "message": "Chỉ hỗ trợ base 'VND'.",
+            "code": "INVALID_ARGUMENT",
+        }
+    if code not in _FAKE_FX_BACKEND:
+        return {
+            "status": "error",
+            "message": f"Không có tỷ giá cho '{currency}'. Chọn một trong {sorted(_VALID_CURRENCIES)}.",
+            "code": "CURRENCY_NOT_FOUND",
+        }
+    return {
+        "status": "success",
+        "data": {"currency": code, "base": base, "rate": _FAKE_FX_BACKEND[code]},
+        "source": "fake-fx-backend (offline)",
+    }
+
+
+GET_EXCHANGE_RATE_SCHEMA = {  # Format OpenAI; Gemini adapter convert ở llm.py
+    "type": "function",
+    "function": {
+        "name": "get_exchange_rate",
+        "description": (
+            "Lấy tỷ giá quy đổi của MỘT loại ngoại tệ sang VND. "
+            "Dùng KHI người dùng hỏi tỷ giá/đổi tiền của một ngoại tệ cụ thể "
+            "(USD, EUR, JPY, KRW, GBP). KHÔNG dùng cho câu hỏi chung chung, cho "
+            "lời khuyên đầu tư, hay khi người dùng chưa nói rõ loại ngoại tệ."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "currency": {
+                    "type": "string",
+                    "description": "Mã ngoại tệ cần tra cứu, ví dụ: 'USD', 'EUR'.",
+                    "enum": sorted(_VALID_CURRENCIES),
+                },
+                "base": {
+                    "type": "string",
+                    "description": "Đồng tiền quy đổi (mặc định 'VND').",
+                    "default": "VND",
+                },
+            },
+            "required": ["currency"],
+        },
+    },
+}
+
+
+# ---------------------------------------------------------------------------
 # TOOL REGISTRY — nối tên tool -> (schema, hàm thực thi)
 # ---------------------------------------------------------------------------
 TOOLS = {
     "get_weather": {"schema": GET_WEATHER_SCHEMA, "fn": get_weather},
     "query_sales": {"schema": QUERY_SALES_SCHEMA, "fn": query_sales},
+    "get_exchange_rate": {"schema": GET_EXCHANGE_RATE_SCHEMA, "fn": get_exchange_rate},
 }
 
 
@@ -289,3 +367,5 @@ if __name__ == "__main__":
     print("query_sales('North','phone','2026-07') ->",
           json.dumps(query_sales("North", "phone", "2026-07"), ensure_ascii=False))
     print("query_sales('Mars')     ->", json.dumps(query_sales("Mars"), ensure_ascii=False))
+    print("get_exchange_rate('USD') ->", json.dumps(get_exchange_rate("USD"), ensure_ascii=False))
+    print("get_exchange_rate('XYZ') ->", json.dumps(get_exchange_rate("XYZ"), ensure_ascii=False))

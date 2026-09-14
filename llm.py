@@ -66,6 +66,19 @@ class MockModel:
     _WEATHER_KW = ("thời tiết", "thoi tiet", "nhiệt độ", "nhiet do", "mưa", "nắng", "trời")
     _SALES_KW = ("doanh thu", "doanh số", "doanh so", "bán được", "revenue", "doanh_thu", "bán hàng")
     _FINANCE_KW = ("bitcoin", "cổ phiếu", "co phieu", "crypto", "đầu tư", "chứng khoán", "giá vàng")
+    _FX_KW = ("tỷ giá", "tỉ giá", "exchange rate", "ngoại tệ", "đổi tiền", "quy đổi", "đổi ngoại tệ")
+    # Prompt injection / cố tình moi system prompt (slide "Defense Strategies").
+    _INJECTION_KW = (
+        "bỏ qua mọi hướng dẫn", "bỏ qua hướng dẫn", "ignore previous", "ignore all previous",
+        "system prompt", "hướng dẫn hệ thống", "prompt hệ thống", "tiết lộ", "reveal your",
+    )
+    _CURRENCIES = {
+        "usd": "USD", "đô la": "USD", "đô-la": "USD", "dollar": "USD",
+        "eur": "EUR", "euro": "EUR",
+        "jpy": "JPY", "yên": "JPY", "yen": "JPY",
+        "krw": "KRW", "won": "KRW",
+        "gbp": "GBP", "bảng anh": "GBP",
+    }
     _CITIES = {
         "hà nội": "Hà Nội", "ha noi": "Hà Nội", "hanoi": "Hà Nội",
         "đà nẵng": "Đà Nẵng", "da nang": "Đà Nẵng", "danang": "Đà Nẵng",
@@ -81,6 +94,16 @@ class MockModel:
         # tools_full: MockModel không cần schema đầy đủ (nó route bằng từ khoá);
         # tham số này chỉ để signature khớp với model thật (Gemini).
         text = user_msg.lower()
+
+        # (0) Prompt injection / yêu cầu tiết lộ system prompt -> từ chối thẳng.
+        #     Bám slide "Defense Strategies": policy layer phải chống bypass.
+        if any(k in text for k in self._INJECTION_KW):
+            return ModelResponse(text=json.dumps({
+                "intent": "prompt injection (đòi bỏ qua hướng dẫn / tiết lộ system prompt)",
+                "action": "direct",
+                "reply": "Mình không thể bỏ qua hướng dẫn hay tiết lộ system prompt. "
+                         "Mình chỉ hỗ trợ tra cứu thời tiết và dữ liệu bán hàng.",
+            }, ensure_ascii=False))
 
         # (1) Ngoài phạm vi: tài chính/đầu tư.
         if any(k in text for k in self._FINANCE_KW):
@@ -100,17 +123,25 @@ class MockModel:
                          "(⚠ bịa — model không có dữ liệu này)",
             }, ensure_ascii=False))
 
-        # (2) Ý định thời tiết.
+        # (2) Ý định thời tiết — hỗ trợ PARALLEL: nhiều thành phố trong 1 câu hỏi
+        #     -> nhiều tool call trong cùng một lượt (app chạy rồi MERGE kết quả).
         if any(k in text for k in self._WEATHER_KW) and "get_weather" in tool_names:
-            city = self._extract_city(text)
-            if city is None:
-                # Thiếu required field -> KHÔNG gọi tool, hỏi lại (Rules).
-                return ModelResponse(text=json.dumps({
-                    "intent": "hỏi thời tiết nhưng thiếu thành phố",
-                    "action": "direct",
-                    "reply": "Bạn muốn xem thời tiết ở thành phố nào ạ?",
-                }, ensure_ascii=False))
-            return ModelResponse(tool_calls=[ToolCall("get_weather", {"city": city})])
+            cities = self._extract_cities(text)
+            if not cities:
+                # Schema TỐT có mô tả "KHÔNG dùng khi ... chưa nói rõ thành phố"
+                # -> model biết hỏi lại thay vì gọi tool thiếu required field.
+                if self._schema_discourages_incomplete(tools_full, "get_weather"):
+                    return ModelResponse(text=json.dumps({
+                        "intent": "hỏi thời tiết nhưng thiếu thành phố",
+                        "action": "direct",
+                        "reply": "Bạn muốn xem thời tiết ở thành phố nào ạ?",
+                    }, ensure_ascii=False))
+                # Schema KÉM (mất phần "khi nào KHÔNG dùng") -> model gọi tool
+                # thiếu tham số -> lỗi arguments (LỖI TOOL SCHEMA, xem demo_errors.py).
+                return ModelResponse(tool_calls=[ToolCall("get_weather", {"city": ""})])
+            return ModelResponse(
+                tool_calls=[ToolCall("get_weather", {"city": c}) for c in cities]
+            )
 
         # (3) Ý định doanh thu.
         if any(k in text for k in self._SALES_KW) and "query_sales" in tool_names:
@@ -122,6 +153,19 @@ class MockModel:
                     "reply": "Bạn muốn xem doanh thu khu vực nào: North, South hay Central?",
                 }, ensure_ascii=False))
             return ModelResponse(tool_calls=[ToolCall("query_sales", {"region": region})])
+
+        # (3b) Ý định tỷ giá ngoại tệ (tool thứ 3).
+        if any(k in text for k in self._FX_KW) and "get_exchange_rate" in tool_names:
+            currency = self._extract_currency(text)
+            if currency is None:
+                return ModelResponse(text=json.dumps({
+                    "intent": "hỏi tỷ giá nhưng thiếu loại ngoại tệ",
+                    "action": "direct",
+                    "reply": "Bạn muốn xem tỷ giá của loại ngoại tệ nào (USD, EUR, JPY...) ạ?",
+                }, ensure_ascii=False))
+            return ModelResponse(
+                tool_calls=[ToolCall("get_exchange_rate", {"currency": currency})]
+            )
 
         # (4) Chào hỏi / hỏi bạn là ai -> trả lời trực tiếp, không tool.
         if any(k in text for k in ("xin chào", "chào", "bạn là ai", "hello", "hi ")):
@@ -141,25 +185,81 @@ class MockModel:
 
     def summarize_tool_result(self, tool_name: str, tool_result: dict, user_msg: str) -> ModelResponse:
         """Lượt 2 của model: biến tool result thành câu trả lời cuối (JSON contract)."""
-        if tool_result.get("status") == "error":
-            reply = f"Không lấy được dữ liệu: {tool_result.get('message')}."
-        elif tool_name == "get_weather":
-            d = tool_result["data"]
-            reply = f"Thời tiết {d['city']}: {d['temp_c']}°C, {d['condition']}."
-        elif tool_name == "query_sales":
-            d = tool_result["data"]
-            reply = (f"Doanh thu khu vực {d['region']} ({d['product']}, {d['month']}): "
-                     f"{d['total_revenue_usd']:,} USD, {d['total_units']:,} sản phẩm.")
-        else:
-            reply = "Đã có kết quả."
         return ModelResponse(text=json.dumps({
-            "intent": user_msg, "action": tool_name, "reply": reply,
+            "intent": user_msg, "action": tool_name,
+            "reply": self._reply_for(tool_name, tool_result),
         }, ensure_ascii=False))
 
-    def _extract_city(self, text: str) -> str | None:
+    def summarize_results(self, results, user_msg: str) -> ModelResponse:
+        """Lượt 2 khi có THỂ NHIỀU tool call: gộp (merge) tất cả thành 1 câu trả lời.
+
+        Pattern PARALLEL FETCH + MERGE: app chạy song song nhiều tool, rồi model
+        tổng hợp các kết quả thành một câu trả lời duy nhất.
+        """
+        if len(results) == 1:
+            name, _args, res = results[0]
+            return self.summarize_tool_result(name, res, user_msg)
+        actions = [name for name, _args, _res in results]
+        replies = [self._reply_for(name, res) for name, _args, res in results]
+        return ModelResponse(text=json.dumps({
+            "intent": user_msg,
+            "action": "+".join(actions),
+            "reply": " | ".join(r for r in replies if r),
+        }, ensure_ascii=False))
+
+    @staticmethod
+    def _reply_for(tool_name: str, tool_result: dict) -> str:
+        """Sinh câu trả lời tiếng Việt từ JSON kết quả của MỘT tool."""
+        if tool_result.get("status") == "error":
+            return f"Không lấy được dữ liệu: {tool_result.get('message')}."
+        if tool_name == "get_weather":
+            d = tool_result["data"]
+            return f"Thời tiết {d['city']}: {d['temp_c']}°C, {d['condition']}."
+        if tool_name == "query_sales":
+            d = tool_result["data"]
+            return (f"Doanh thu khu vực {d['region']} ({d['product']}, {d['month']}): "
+                    f"{d['total_revenue_usd']:,} USD, {d['total_units']:,} sản phẩm.")
+        if tool_name == "get_exchange_rate":
+            d = tool_result["data"]
+            return f"Tỷ giá: 1 {d['currency']} = {d['rate']:,} {d['base']}."
+        return "Đã có kết quả."
+
+    @staticmethod
+    def _schema_discourages_incomplete(tools_full: list[dict] | None, name: str) -> bool:
+        """True nếu description của tool có phần "khi nào KHÔNG dùng" (schema tốt).
+
+        Đây là cách mô phỏng việc model thật bám vào description để quyết định:
+        description thiếu -> model gọi tool ngay cả khi thiếu required field.
+        """
+        for t in tools_full or []:
+            fn = t.get("function", {})
+            if fn.get("name") == name:
+                return "không dùng" in fn.get("description", "").lower()
+        return True  # không truyền schema -> giữ hành vi an toàn (hỏi lại)
+
+    def _extract_cities(self, text: str) -> list[str]:
+        """Tất cả thành phố xuất hiện trong câu (theo thứ tự, đã khử trùng lặp)."""
+        found: list[tuple[int, str]] = []
         for key, name in self._CITIES.items():
+            idx = text.find(key)
+            if idx != -1:
+                found.append((idx, name))
+        found.sort()
+        ordered: list[str] = []
+        for _idx, name in found:
+            if name not in ordered:
+                ordered.append(name)
+        return ordered
+
+    def _extract_city(self, text: str) -> str | None:
+        cities = self._extract_cities(text)
+        return cities[0] if cities else None
+
+    def _extract_currency(self, text: str) -> str | None:
+        # ưu tiên alias dài trước ("bảng anh" trước "gbp")
+        for key in sorted(self._CURRENCIES, key=len, reverse=True):
             if key in text:
-                return name
+                return self._CURRENCIES[key]
         return None
 
     def _extract_region(self, text: str) -> str | None:
@@ -286,21 +386,108 @@ class _GeminiModel:
         )
         return ModelResponse(text=resp.text)
 
+    def summarize_results(self, results, user_msg):
+        """Lượt 2 khi có thể nhiều tool call: gộp kết quả thành 1 câu trả lời."""
+        if len(results) == 1:
+            name, _args, res = results[0]
+            return self.summarize_tool_result(name, res, user_msg)
+        types = self._types
+        lines = "\n".join(
+            f"Kết quả tool {name}: {json.dumps(res, ensure_ascii=False)}"
+            for name, _args, res in results
+        )
+        prompt = (
+            f"Câu hỏi người dùng: {user_msg}\n{lines}\n"
+            "Hãy GỘP TẤT CẢ kết quả tool trên thành MỘT câu trả lời. "
+            'Chỉ dựa trên kết quả tool, trả về JSON đúng 3 field '
+            '{"intent": "...", "action": "...", "reply": "..."} bằng tiếng Việt.'
+        )
+        resp = self._call_with_retry(
+            self.client.models.generate_content,
+            model=self.model,
+            contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json"),
+        )
+        return ModelResponse(text=resp.text)
+
 
 class _AnthropicModel:
-    """Adapter tối giản cho Anthropic Messages (cần `pip install anthropic`)."""
+    """Adapter cho Anthropic Messages (cần `pip install anthropic`).
+
+    Bài tập mở rộng 5 — khác biệt so với OpenAI/Gemini (slide *OpenAI vs
+    Anthropic Format*):
+      - Tool schema dùng `input_schema`, KHÔNG có lớp "type": "function" bọc ngoài.
+      - System prompt truyền qua tham số `system` riêng, không nằm trong messages.
+      - Model trả tool call trong `response.content` với `block.type == "tool_use"`
+        (mỗi block có `.name`, `.input`, `.id`).
+
+    Nhờ lớp chuẩn hoá `ModelResponse`, `agent.py` chạy y hệt các model khác:
+        LAB_MODEL=anthropic python run_tests.py
+    """
+
+    _MAX_TOKENS = 1024
 
     def __init__(self, model: str = "claude-sonnet-4-5"):
         import anthropic
         self.client = anthropic.Anthropic()
         self.model = model
 
+    @staticmethod
+    def _tool_config(tools_full):
+        """Convert schema format OpenAI -> format Anthropic (input_schema)."""
+        return [
+            {
+                "name": t["function"]["name"],
+                "description": t["function"]["description"],
+                "input_schema": t["function"]["parameters"],
+            }
+            for t in (tools_full or [])
+        ]
+
     def decide(self, system_prompt, user_msg, tool_names, tools_full=None):
-        # Anthropic dùng input_schema thay vì parameters — cần convert nếu dùng thật.
-        raise NotImplementedError(
-            "Ví dụ tham khảo: convert schema OpenAI -> Anthropic (input_schema) "
-            "rồi dùng content[i].type == 'tool_use'. Xem slide 'OpenAI vs Anthropic Format'."
+        kwargs = dict(
+            model=self.model,
+            max_tokens=self._MAX_TOKENS,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_msg}],
         )
+        if tools_full:
+            kwargs["tools"] = self._tool_config(tools_full)
+
+        resp = self.client.messages.create(**kwargs)
+
+        tool_calls = []
+        text_parts = []
+        for block in resp.content:
+            if block.type == "tool_use":
+                tool_calls.append(ToolCall(block.name, dict(block.input), block.id))
+            elif block.type == "text":
+                text_parts.append(block.text)
+
+        if tool_calls:
+            return ModelResponse(tool_calls=tool_calls)
+        text = "\n".join(text_parts).strip()
+        return ModelResponse(text=text or None)
 
     def summarize_tool_result(self, tool_name, tool_result, user_msg):
-        raise NotImplementedError
+        return self.summarize_results([(tool_name, {}, tool_result)], user_msg)
+
+    def summarize_results(self, results, user_msg):
+        """Lượt 2: gộp (các) tool result thành câu trả lời cuối theo JSON contract."""
+        lines = "\n".join(
+            f"Kết quả tool {name}: {json.dumps(res, ensure_ascii=False)}"
+            for name, _args, res in results
+        )
+        action = "+".join(name for name, _args, _res in results)
+        prompt = (
+            f"Câu hỏi người dùng: {user_msg}\n{lines}\n"
+            "Chỉ dựa trên kết quả tool, trả về JSON đúng 3 field "
+            f'{{"intent": "...", "action": "{action}", "reply": "..."}} bằng tiếng Việt.'
+        )
+        resp = self.client.messages.create(
+            model=self.model,
+            max_tokens=self._MAX_TOKENS,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = "".join(b.text for b in resp.content if b.type == "text").strip()
+        return ModelResponse(text=text or None)

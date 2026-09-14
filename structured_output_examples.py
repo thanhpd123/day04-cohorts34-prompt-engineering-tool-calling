@@ -20,6 +20,17 @@ from __future__ import annotations
 import json
 import os
 import time
+from pathlib import Path
+
+# Nạp GEMINI_API_KEY từ file .env (nếu có) để chạy ngay, không cần export thủ công.
+try:
+    from dotenv import load_dotenv
+
+    _ENV_FILE = Path(__file__).with_name(".env")
+    if _ENV_FILE.exists():
+        load_dotenv(_ENV_FILE)
+except ImportError:  # python-dotenv là tuỳ chọn
+    pass
 
 MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 _MAX_RETRIES = 3

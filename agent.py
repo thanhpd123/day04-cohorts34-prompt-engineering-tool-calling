@@ -57,18 +57,22 @@ def run_agent(user_msg: str, model=None, system_prompt: str = SYSTEM_PROMPT,
     step = 0
     while resp.wants_tool and step < max_steps:
         step += 1
+
+        # --- Bước 2+3: App executes TẤT CẢ tool call của lượt này (parallel fetch) ---
+        results: list[tuple[str, dict, dict]] = []
         for call in resp.tool_calls:
             trace.log(f"[decide] model muốn gọi tool: {call.name}({call.arguments})")
             trace.tool_calls.append(call.name)
 
-            # --- Bước 2+3: App executes tool -> tool result ---
             result = execute_tool(call.name, call.arguments)
             trace.log(f"[execute] {call.name} -> {json.dumps(result, ensure_ascii=False)}")
+            results.append((call.name, call.arguments, result))
 
-            # --- Bước 4: feed tool result trở lại model -> final response ---
-            # (Quên bước này = LỖI CONTROL FLOW, xem demo_errors.py)
-            resp = model.summarize_tool_result(call.name, result, user_msg)
-        # MockModel chỉ gọi 1 tool/câu nên vòng lặp kết thúc sau lần feed đầu.
+        # --- Bước 4: feed (các) tool result trở lại model -> final response ---
+        # (Quên bước này = LỖI CONTROL FLOW, xem demo_errors.py)
+        # Nhiều tool call trong 1 lượt -> summarize_results() sẽ MERGE kết quả
+        # (pattern parallel fetch + merge; 1 tool call thì hoạt động như cũ).
+        resp = model.summarize_results(results, user_msg)
 
     # --- Trả lời trực tiếp hoặc kết quả cuối ---
     if not trace.called_tool:

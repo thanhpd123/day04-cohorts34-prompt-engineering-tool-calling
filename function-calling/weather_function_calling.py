@@ -9,8 +9,20 @@ Cách chạy:
     python weather_function_calling.py
 """
 
+from pathlib import Path
+
 from google import genai
 from google.genai import types
+
+# Nạp GEMINI_API_KEY từ ../.env (nếu có) để chạy ngay, không cần export thủ công.
+try:
+    from dotenv import load_dotenv
+
+    _ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+    if _ENV_FILE.exists():
+        load_dotenv(_ENV_FILE)
+except ImportError:  # python-dotenv là tuỳ chọn
+    pass
 
 client = genai.Client()
 

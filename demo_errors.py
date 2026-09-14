@@ -20,7 +20,7 @@ import json
 from agent import run_agent
 from llm import MockModel
 from system_prompt import BROKEN_SYSTEM_PROMPT, SYSTEM_PROMPT
-from tools import execute_tool
+from tools import GET_WEATHER_SCHEMA, execute_tool, tool_schemas
 
 
 def banner(title: str) -> None:
@@ -73,6 +73,48 @@ def demo_tool_schema_error() -> None:
 
 
 # ---------------------------------------------------------------------------
+# LỖI 2b — TOOL SCHEMA (biến thể): description mơ hồ -> model gọi tool khi thiếu dữ liệu.
+# ---------------------------------------------------------------------------
+def demo_tool_description_error() -> None:
+    banner("LỖI 2b — TOOL SCHEMA: description mơ hồ -> gọi tool thiếu required field")
+    q = "Cho tôi xem thời tiết đi."
+    model = MockModel()
+
+    # Schema GOOD: description có phần "KHÔNG dùng khi ... chưa nói rõ thành phố".
+    good = tool_schemas()
+    names = [t["function"]["name"] for t in good]
+
+    # Schema BAD: chỉ còn "Gets weather." — mất phần "khi nào KHÔNG dùng".
+    import copy
+
+    bad = copy.deepcopy(good)
+    for t in bad:
+        if t["function"]["name"] == "get_weather":
+            t["function"]["description"] = "Gets weather."
+
+    print(">> SYMPTOM (description bị làm hỏng, câu hỏi thiếu thành phố):")
+    resp_bad = model.decide(SYSTEM_PROMPT, q, names, bad)
+    if resp_bad.wants_tool:
+        call = resp_bad.tool_calls[0]
+        res = execute_tool(call.name, call.arguments)
+        print(f"   model GỌI TOOL: {call.name}({call.arguments})")
+        print("   execute_tool ->", json.dumps(res, ensure_ascii=False))
+    else:
+        print("   model trả lời trực tiếp:", resp_bad.text)
+
+    print("\n>> DIAGNOSIS: hàm get_weather vẫn đúng, prompt đúng, nhưng DESCRIPTION mất")
+    print("   phần 'KHÔNG dùng khi chưa rõ thành phố' -> model gọi tool thiếu required")
+    print("   field. Đây là LỖI TOOL SCHEMA (sửa mô tả schema, không sửa hàm).")
+
+    print("\n>> FIX (khôi phục phần 'KHÔNG dùng ...' trong description):")
+    resp_ok = model.decide(SYSTEM_PROMPT, q, names, good)
+    if resp_ok.wants_tool:
+        print(f"   model GỌI TOOL: {resp_ok.tool_calls[0].name}({resp_ok.tool_calls[0].arguments})")
+    else:
+        print("   model hỏi lại (direct):", resp_ok.text)
+
+
+# ---------------------------------------------------------------------------
 # LỖI 3 — CONTROL FLOW: vòng lặp quên feed tool result trở lại model.
 # ---------------------------------------------------------------------------
 def run_agent_broken(user_msg: str, model=None) -> str:
@@ -105,6 +147,7 @@ def demo_control_flow_error() -> None:
 if __name__ == "__main__":
     demo_prompt_error()
     demo_tool_schema_error()
+    demo_tool_description_error()
     demo_control_flow_error()
     print("\nTóm lại: cùng một câu hỏi có thể hỏng vì PROMPT, vì TOOL SCHEMA, hoặc vì")
     print("CONTROL FLOW. Chẩn đoán đúng NHÓM lỗi mới sửa đúng chỗ. Xem errors.md.")
